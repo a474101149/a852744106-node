@@ -349,7 +349,8 @@ cat > "$SITE_DIR/404.html" <<'HTML'
 HTML
 chmod 644 "$SITE_DIR"/index.html "$SITE_DIR"/404.html
 
-cat > /etc/nginx/sites-available/mynode <<'NGINX'
+mkdir -p /etc/nginx/conf.d
+cat > /etc/nginx/conf.d/mynode.conf <<'NGINX'
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
@@ -381,9 +382,11 @@ server {
     location = /404.html { internal; }
 }
 NGINX
-sed -i "s|__DOMAIN__|$DOMAIN|g; s|__WS_PATH__|$WS_PATH|g" /etc/nginx/sites-available/mynode
-rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/mynode
-ln -s /etc/nginx/sites-available/mynode /etc/nginx/sites-enabled/mynode
+sed -i "s|__DOMAIN__|$DOMAIN|g; s|__WS_PATH__|$WS_PATH|g" /etc/nginx/conf.d/mynode.conf
+# v6/v6.1 used the Debian sites-* layout; remove those copies so the same
+# server is never loaded twice (boxes with that layout keep working via
+# conf.d, which every nginx package includes).
+rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/mynode /etc/nginx/sites-available/mynode
 nginx -t
 grn "伪装站与 nginx 前置已就绪（443 由 nginx 接管，VLESS 藏到本机 10001）"
 
