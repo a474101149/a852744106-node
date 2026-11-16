@@ -30,11 +30,23 @@ print_links() {
   . "$CREDS"
   local enc_path
   enc_path=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$WS_PATH")
-  grn  "==================== 节点链接（保存好） ===================="
-  echo "HY2   : hy2://${HY2_PASS}@${DOMAIN}:443?obfs=salamander&obfs-password=${OBFS_PASS}&sni=${DOMAIN}&insecure=0#HY2-${DOMAIN}"
-  echo "VLESS : vless://${UUID}@${DOMAIN}:443?security=tls&type=ws&host=${DOMAIN}&sni=${DOMAIN}&path=${enc_path}&encryption=none#VLESS-${DOMAIN}"
-  grn  "=============================================================="
-  echo "链接同时保存在 /root/mynode-links.txt ，随时可跑: bash install.sh links"
+  echo ""
+  grn "=================================================================="
+  grn "  安装完成！下面是你的节点链接（相当于钥匙，请勿外传）"
+  grn "=================================================================="
+  echo ""
+  echo "【HY2 节点】（速度优先，日常主力用这个）"
+  echo "hy2://${HY2_PASS}@${DOMAIN}:443?obfs=salamander&obfs-password=${OBFS_PASS}&sni=${DOMAIN}&insecure=0#HY2-${DOMAIN}"
+  echo ""
+  echo "【VLESS 节点】（备用，兼容性好）"
+  echo "vless://${UUID}@${DOMAIN}:443?security=tls&type=ws&host=${DOMAIN}&sni=${DOMAIN}&path=${enc_path}&encryption=none#VLESS-${DOMAIN}"
+  echo ""
+  ylw "使用方法：复制整条链接 → 打开 V2RayN → 菜单「服务器」→「从剪贴板导入批量URL」"
+  ylw "链接备份在 VPS 的 /root/mynode-links.txt ，以后随时查看：bash install.sh links"
+  ylw "服务管理：systemctl status mynode（状态） / systemctl restart mynode（重启）"
+  ylw "提醒：这个域名不要开 Cloudflare 橙云（小云朵保持灰色），否则节点会连不上；"
+  ylw "      证书由 acme.sh 自动续期，不用你操心。"
+  grn "=================================================================="
 }
 
 if [[ "${1:-}" == "links" ]]; then
@@ -55,11 +67,19 @@ case "${ID:-}" in
   *) red "只支持 Debian / Ubuntu（当前: ${ID:-unknown}）"; exit 1 ;;
 esac
 
+grn "=================================================================="
+grn "  mynode 个人节点安装开始"
+grn "  域名：$DOMAIN（HY2 + VLESS，两个节点共用这一个域名）"
+grn "=================================================================="
+
+echo "【1/6】安装依赖软件（curl、jq 等），刷屏是正常的，等它跑完……"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y curl jq openssl socat cron python3 ca-certificates >/dev/null
+echo "依赖安装完成。"
 
 # ---------------------------------------------------------------- sing-box
+echo "【2/6】安装 sing-box 内核……"
 if [[ ! -x $SB_BIN ]]; then
   arch=$(uname -m)
   case "$arch" in
@@ -81,8 +101,10 @@ else
 fi
 
 # ---------------------------------------------------------------- credentials
+echo "【3/6】准备节点凭据（UUID 和密码）……"
 mkdir -p "$CONF_DIR" "$CERT_DIR"
 if [[ -f $CREDS ]]; then
+  echo "检测到已有凭据：沿用原来的 UUID/密码，重装不会让你的客户端链接失效。"
   . "$CREDS"
   # domain may change between runs; keep secrets, update domain
   if [[ "$DOMAIN" != "${DOMAIN_SAVED:-}" ]]; then
@@ -105,6 +127,9 @@ EOF
 chmod 600 "$CREDS"
 
 # ---------------------------------------------------------------- certificate
+echo "【4/6】申请 Let's Encrypt 证书……"
+ylw "提醒：接下来会刷出一大段英文，那是证书工具 acme.sh 的正常日志，"
+ylw "      你不用看懂，看到「Cert success」就是证书签下来了。"
 if ss -tlnp 2>/dev/null | grep -q ':80 '; then
   ylw "注意: 80 端口已被占用，acme 签发可能会失败。若是旧服务的 nginx 占着，先停掉它再重跑本脚本。"
 fi
@@ -123,9 +148,10 @@ fi
   --key-file "$CERT_DIR/key.pem" \
   --fullchain-file "$CERT_DIR/cert.pem" \
   --reloadcmd "systemctl restart $SERVICE || true" >/dev/null || true
-grn "证书就绪: $CERT_DIR/cert.pem"
+grn "证书环节结束，证书已就绪: $CERT_DIR/cert.pem"
 
 # ---------------------------------------------------------------- config
+echo "【5/6】写入节点配置并启动服务……"
 cat > "$CONF_DIR/config.json" <<EOF
 {
   "log": { "level": "warn", "timestamp": true },
@@ -192,7 +218,8 @@ if command -v ufw >/dev/null && ufw status | grep -qi active; then
 fi
 
 sleep 1
-systemctl is-active --quiet "$SERVICE" && grn "服务运行中" || { red "服务没起来，看日志: journalctl -u $SERVICE -n 50"; exit 1; }
+systemctl is-active --quiet "$SERVICE" && grn "服务已启动并正在运行。" || { red "服务没起来，看日志: journalctl -u $SERVICE -n 50"; exit 1; }
+echo "【6/6】全部完成，节点链接如下："
 
 # ---------------------------------------------------------------- links out
 . "$CREDS"
