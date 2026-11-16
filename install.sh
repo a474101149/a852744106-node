@@ -122,7 +122,7 @@ fi
 ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
   --key-file "$CERT_DIR/key.pem" \
   --fullchain-file "$CERT_DIR/cert.pem" \
-  --reloadcmd "systemctl restart $SERVICE" >/dev/null
+  --reloadcmd "systemctl restart $SERVICE || true" >/dev/null || true
 grn "证书就绪: $CERT_DIR/cert.pem"
 
 # ---------------------------------------------------------------- config
