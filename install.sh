@@ -4,6 +4,10 @@
 # Installs sing-box with exactly two inbounds on one domain:
 #   * Hysteria2            (UDP 443, TLS + salamander obfs)
 #   * VLESS + WS + TLS     (TCP 443)
+# TCP 443 is fronted by nginx: it serves a small decoy website to normal
+# browsers and reverse-proxies only the secret WS path to sing-box
+# (VLESS then listens on 127.0.0.1:10001, plain WS, no public port).
+# Client links are unchanged by this: same domain, port, path and TLS.
 # Optional: if a Cloudflare WARP proxy is already running locally in
 # socks mode on 127.0.0.1:40000 (warp-cli, e.g. a Zero Trust team
 # registration), two extra -WARP inbounds are added on port 8443
@@ -58,6 +62,8 @@ print_links() {
   ylw "服务管理：systemctl status mynode（状态） / systemctl restart mynode（重启）"
   ylw "提醒：这个域名不要开 Cloudflare 橙云（小云朵保持灰色），否则节点会连不上；"
   ylw "      证书由 acme.sh 自动续期，不用你操心。"
+  ylw "伪装站：用浏览器打开 https://${DOMAIN} 会看到一个普通英文博客页面，"
+  ylw "      这是故意挂的伪装，节点入口藏在只有你知道的路径后面。"
   grn "=================================================================="
 }
 
@@ -87,7 +93,11 @@ grn "=================================================================="
 echo "【1/6】安装依赖软件（curl、jq 等），刷屏是正常的，等它跑完……"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl jq openssl socat cron python3 ca-certificates >/dev/null
+apt-get install -y curl jq openssl socat cron python3 ca-certificates nginx >/dev/null
+# nginx may auto-start with its default site on port 80, which would block
+# the acme.sh standalone issuance below; it is configured and (re)started
+# properly in step 5, so keep it stopped for now.
+systemctl stop nginx 2>/dev/null || true
 echo "依赖安装完成。"
 
 # ---------------------------------------------------------------- sing-box
@@ -172,11 +182,11 @@ fi
 ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
   --key-file "$CERT_DIR/key.pem" \
   --fullchain-file "$CERT_DIR/cert.pem" \
-  --reloadcmd "systemctl restart $SERVICE || true" >/dev/null || true
+  --reloadcmd "systemctl restart $SERVICE || true; systemctl reload nginx || true" >/dev/null || true
 grn "证书环节结束，证书已就绪: $CERT_DIR/cert.pem"
 
 # ---------------------------------------------------------------- config
-echo "【5/6】写入节点配置并启动服务……"
+echo "【5/6】写入节点配置、伪装网站并启动服务……"
 WARP_INBOUNDS=""
 WARP_OUTBOUND=""
 WARP_RULES=""
@@ -241,15 +251,9 @@ cat > "$CONF_DIR/config.json" <<EOF
     {
       "type": "vless",
       "tag": "vless-in",
-      "listen": "::",
-      "listen_port": 443,
+      "listen": "127.0.0.1",
+      "listen_port": 10001,
       "users": [ { "uuid": "$UUID" } ],
-      "tls": {
-        "enabled": true,
-        "server_name": "$DOMAIN",
-        "certificate_path": "$CERT_DIR/cert.pem",
-        "key_path": "$CERT_DIR/key.pem"
-      },
       "transport": { "type": "ws", "path": "$WS_PATH" }
     }$WARP_INBOUNDS
   ],
@@ -259,6 +263,128 @@ cat > "$CONF_DIR/config.json" <<EOF
 EOF
 "$SB_BIN" check -c "$CONF_DIR/config.json"
 grn "配置校验通过"
+
+# ---------------------------------------------------------------- decoy site + nginx front
+# nginx owns public TCP 443: browsers get a small static site; only the
+# exact secret WS path is proxied to sing-box on 127.0.0.1:10001.
+SITE_DIR=/var/www/mynode-site
+mkdir -p "$SITE_DIR"
+# nginx workers (www-data) must be able to read the site regardless of umask
+chmod 755 "$SITE_DIR"
+cat > "$SITE_DIR/index.html" <<'HTML'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fieldnotes — systems, networks, and other curiosities</title>
+<style>
+  body { font-family: Georgia, 'Times New Roman', serif; color: #222; background: #fdfdfa;
+         max-width: 44rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; line-height: 1.65; }
+  header { border-bottom: 2px solid #222; padding-bottom: 1rem; margin-bottom: 2rem; }
+  header h1 { font-size: 1.9rem; margin: 0; letter-spacing: .02em; }
+  header p { color: #666; margin: .3rem 0 0; font-style: italic; }
+  nav { margin-top: .8rem; font-size: .95rem; }
+  nav a { color: #14532d; margin-right: 1.2rem; text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  article { margin-bottom: 2.2rem; }
+  article h2 { font-size: 1.25rem; margin: 0 0 .2rem; }
+  article h2 a { color: #222; text-decoration: none; }
+  article h2 a:hover { text-decoration: underline; }
+  .meta { color: #888; font-size: .85rem; margin-bottom: .4rem; }
+  footer { border-top: 1px solid #ccc; margin-top: 3rem; padding-top: 1rem;
+           color: #888; font-size: .85rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fieldnotes</h1>
+  <p>Occasional notes on systems, networks, and other curiosities.</p>
+  <nav><a href="/">Home</a><a href="/">Archive</a><a href="/">About</a></nav>
+</header>
+<main>
+  <article>
+    <h2><a href="/">Notes on running a small home lab in 2026</a></h2>
+    <div class="meta">November 2, 2026 · 6 min read</div>
+    <p>Every few years I rebuild my home lab from scratch, mostly to see which of my
+    old assumptions still hold. This time the surprise was how far a single low-power
+    box and a couple of containers will take you before you actually need a rack.</p>
+  </article>
+  <article>
+    <h2><a href="/">What I check first when a server feels slow</a></h2>
+    <div class="meta">October 18, 2026 · 4 min read</div>
+    <p>Most "the server is slow" reports turn out to be one of three things: a disk
+    quietly failing, a backup job colliding with peak hours, or DNS. A short checklist
+    I run before touching anything else, in the order I actually run it.</p>
+  </article>
+  <article>
+    <h2><a href="/">Backups are a restore you have not tested yet</a></h2>
+    <div class="meta">September 30, 2026 · 5 min read</div>
+    <p>A backup schedule is a promise; a restore drill is the evidence. Some notes on
+    keeping off-site copies boring, encrypted, and — above all — regularly rehearsed,
+    so the worst day does not become an improvisation exercise.</p>
+  </article>
+</main>
+<footer>© 2026 Fieldnotes · Built by hand, hosted on a small machine that minds its own business.</footer>
+</body>
+</html>
+HTML
+cat > "$SITE_DIR/404.html" <<'HTML'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>404 — Fieldnotes</title>
+<style>
+  body { font-family: Georgia, 'Times New Roman', serif; color: #222; background: #fdfdfa;
+         max-width: 44rem; margin: 0 auto; padding: 4rem 1.25rem; line-height: 1.65; text-align: center; }
+  a { color: #14532d; }
+</style>
+</head>
+<body>
+  <h1>404</h1>
+  <p>That page wandered off. <a href="/">Back to the front page</a>.</p>
+</body>
+</html>
+HTML
+chmod 644 "$SITE_DIR"/index.html "$SITE_DIR"/404.html
+
+cat > /etc/nginx/sites-available/mynode <<'NGINX'
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name __DOMAIN__;
+
+    ssl_certificate     /etc/mynode/cert/cert.pem;
+    ssl_certificate_key /etc/mynode/cert/key.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    server_tokens       off;
+
+    root  /var/www/mynode-site;
+    index index.html;
+
+    location = __WS_PATH__ {
+        proxy_pass http://127.0.0.1:10001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+    error_page 404 /404.html;
+    location = /404.html { internal; }
+}
+NGINX
+sed -i "s|__DOMAIN__|$DOMAIN|g; s|__WS_PATH__|$WS_PATH|g" /etc/nginx/sites-available/mynoderm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/mynode
+ln -s /etc/nginx/sites-available/mynode /etc/nginx/sites-enabled/mynode
+nginx -t
+grn "伪装站与 nginx 前置已就绪（443 由 nginx 接管，VLESS 藏到本机 10001）"
 
 # ---------------------------------------------------------------- service
 cat > "/etc/systemd/system/${SERVICE}.service" <<EOF
@@ -277,6 +403,11 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now "$SERVICE"
+# explicit restart: guarantees the freshly written config is the running
+# one on re-runs, and frees public TCP 443 before nginx takes it over.
+systemctl restart "$SERVICE"
+systemctl enable nginx >/dev/null 2>&1 || true
+systemctl restart nginx
 
 # firewall (best effort)
 if command -v ufw >/dev/null && ufw status | grep -qi active; then
@@ -290,7 +421,7 @@ if command -v ufw >/dev/null && ufw status | grep -qi active; then
 fi
 
 sleep 1
-systemctl is-active --quiet "$SERVICE" && grn "服务已启动并正在运行。" || { red "服务没起来，看日志: journalctl -u $SERVICE -n 50"; exit 1; }
+systemctl is-active --quiet "$SERVICE" && systemctl is-active --quiet nginx && grn "服务已启动并正在运行（sing-box + nginx 伪装站）。" || { red "服务没起来，看日志: journalctl -u $SERVICE -n 50 以及 systemctl status nginx"; exit 1; }
 echo "【6/6】全部完成，节点链接如下："
 
 # ---------------------------------------------------------------- links out
