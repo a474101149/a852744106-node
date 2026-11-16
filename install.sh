@@ -381,7 +381,8 @@ server {
     location = /404.html { internal; }
 }
 NGINX
-sed -i "s|__DOMAIN__|$DOMAIN|g; s|__WS_PATH__|$WS_PATH|g" /etc/nginx/sites-available/mynoderm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/mynode
+sed -i "s|__DOMAIN__|$DOMAIN|g; s|__WS_PATH__|$WS_PATH|g" /etc/nginx/sites-available/mynode
+rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/mynode
 ln -s /etc/nginx/sites-available/mynode /etc/nginx/sites-enabled/mynode
 nginx -t
 grn "伪装站与 nginx 前置已就绪（443 由 nginx 接管，VLESS 藏到本机 10001）"
