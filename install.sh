@@ -188,6 +188,8 @@ if [[ "$WARP_ON" == "1" ]]; then
       "tag": "hy2-warp-in",
       "listen": "::",
       "listen_port": 8443,
+      "up_mbps": 1000,
+      "down_mbps": 1000,
       "users": [ { "password": "$HY2_PASS" } ],
       "obfs": { "type": "salamander", "password": "$OBFS_PASS" },
       "tls": {
@@ -225,6 +227,8 @@ cat > "$CONF_DIR/config.json" <<EOF
       "tag": "hy2-in",
       "listen": "::",
       "listen_port": 443,
+      "up_mbps": 1000,
+      "down_mbps": 1000,
       "users": [ { "password": "$HY2_PASS" } ],
       "obfs": { "type": "salamander", "password": "$OBFS_PASS" },
       "tls": {
