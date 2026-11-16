@@ -4,6 +4,10 @@
 # Installs sing-box with exactly two inbounds on one domain:
 #   * Hysteria2            (UDP 443, TLS + salamander obfs)
 #   * VLESS + WS + TLS     (TCP 443)
+# Optional: if a Cloudflare WARP proxy is already running locally in
+# socks mode on 127.0.0.1:40000 (warp-cli, e.g. a Zero Trust team
+# registration), two extra -WARP inbounds are added on port 8443
+# (HY2 UDP + VLESS TCP) whose traffic exits through WARP.
 # Certificate: Let's Encrypt via acme.sh (HTTP-01 standalone, needs port 80).
 #
 # Usage:
@@ -40,6 +44,14 @@ print_links() {
   echo ""
   echo "【VLESS 节点】（备用，兼容性好）"
   echo "vless://${UUID}@${DOMAIN}:443?security=tls&type=ws&host=${DOMAIN}&sni=${DOMAIN}&path=${enc_path}&encryption=none#VLESS-${DOMAIN}"
+  if [[ "${WARP:-0}" == "1" ]]; then
+    echo ""
+    echo "【HY2-WARP 节点】（8443，出口走 Cloudflare 团队 WARP）"
+    echo "hy2://${HY2_PASS}@${DOMAIN}:8443?obfs=salamander&obfs-password=${OBFS_PASS}&sni=${DOMAIN}&insecure=0#HY2-WARP-${DOMAIN}"
+    echo ""
+    echo "【VLESS-WARP 节点】（8443，出口走 Cloudflare 团队 WARP）"
+    echo "vless://${UUID}@${DOMAIN}:8443?security=tls&type=ws&host=${DOMAIN}&sni=${DOMAIN}&path=${enc_path}&encryption=none#VLESS-WARP-${DOMAIN}"
+  fi
   echo ""
   ylw "使用方法：复制整条链接 → 打开 V2RayN → 菜单「服务器」→「从剪贴板导入批量URL」"
   ylw "链接备份在 VPS 的 /root/mynode-links.txt ，以后随时查看：bash install.sh links"
@@ -100,6 +112,18 @@ else
   grn "sing-box 已存在: $($SB_BIN version | head -1)"
 fi
 
+# ---------------------------------------------------------------- WARP detect
+# warp-cli in proxy mode listens on 127.0.0.1:40000 (socks5). If it is
+# there, we add the two -WARP inbounds; if not, install stays 2-inbound.
+WARP_ON=0
+if (exec 3<>/dev/tcp/127.0.0.1/40000) 2>/dev/null; then
+  exec 3>&- 3<&- || true
+  WARP_ON=1
+  grn "检测到本地 WARP 代理 (127.0.0.1:40000)：将额外添加 8443 的 HY2-WARP / VLESS-WARP 两个入口（出口走 WARP）。"
+else
+  echo "未检测到本地 WARP 代理 (127.0.0.1:40000)：只装直连的两个入口。以后连上 WARP 再重跑本脚本即可补上。"
+fi
+
 # ---------------------------------------------------------------- credentials
 echo "【3/6】准备节点凭据（UUID 和密码）……"
 mkdir -p "$CONF_DIR" "$CERT_DIR"
@@ -123,6 +147,7 @@ UUID=$UUID
 HY2_PASS=$HY2_PASS
 OBFS_PASS=$OBFS_PASS
 WS_PATH=$WS_PATH
+WARP=$WARP_ON
 EOF
 chmod 600 "$CREDS"
 
@@ -152,6 +177,45 @@ grn "证书环节结束，证书已就绪: $CERT_DIR/cert.pem"
 
 # ---------------------------------------------------------------- config
 echo "【5/6】写入节点配置并启动服务……"
+WARP_INBOUNDS=""
+WARP_OUTBOUND=""
+WARP_RULES=""
+if [[ "$WARP_ON" == "1" ]]; then
+  WARP_INBOUNDS=$(cat <<WJSON
+,
+    {
+      "type": "hysteria2",
+      "tag": "hy2-warp-in",
+      "listen": "::",
+      "listen_port": 8443,
+      "users": [ { "password": "$HY2_PASS" } ],
+      "obfs": { "type": "salamander", "password": "$OBFS_PASS" },
+      "tls": {
+        "enabled": true,
+        "server_name": "$DOMAIN",
+        "certificate_path": "$CERT_DIR/cert.pem",
+        "key_path": "$CERT_DIR/key.pem"
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vless-warp-in",
+      "listen": "::",
+      "listen_port": 8443,
+      "users": [ { "uuid": "$UUID" } ],
+      "tls": {
+        "enabled": true,
+        "server_name": "$DOMAIN",
+        "certificate_path": "$CERT_DIR/cert.pem",
+        "key_path": "$CERT_DIR/key.pem"
+      },
+      "transport": { "type": "ws", "path": "$WS_PATH" }
+    }
+WJSON
+)
+  WARP_OUTBOUND=', { "type": "socks", "tag": "warp", "server": "127.0.0.1", "server_port": 40000 }'
+  WARP_RULES=', "rules": [ { "inbound": ["hy2-warp-in", "vless-warp-in"], "outbound": "warp" } ]'
+fi
 cat > "$CONF_DIR/config.json" <<EOF
 {
   "log": { "level": "warn", "timestamp": true },
@@ -183,10 +247,10 @@ cat > "$CONF_DIR/config.json" <<EOF
         "key_path": "$CERT_DIR/key.pem"
       },
       "transport": { "type": "ws", "path": "$WS_PATH" }
-    }
+    }$WARP_INBOUNDS
   ],
-  "outbounds": [ { "type": "direct", "tag": "direct" } ],
-  "route": { "final": "direct" }
+  "outbounds": [ { "type": "direct", "tag": "direct" }$WARP_OUTBOUND ],
+  "route": { "final": "direct"$WARP_RULES }
 }
 EOF
 "$SB_BIN" check -c "$CONF_DIR/config.json"
@@ -215,6 +279,10 @@ if command -v ufw >/dev/null && ufw status | grep -qi active; then
   ufw allow 443/tcp >/dev/null || true
   ufw allow 443/udp >/dev/null || true
   ufw allow 80/tcp  >/dev/null || true
+  if [[ "$WARP_ON" == "1" ]]; then
+    ufw allow 8443/tcp >/dev/null || true
+    ufw allow 8443/udp >/dev/null || true
+  fi
 fi
 
 sleep 1
@@ -227,5 +295,9 @@ enc_path=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv
 {
   echo "hy2://${HY2_PASS}@${DOMAIN}:443?obfs=salamander&obfs-password=${OBFS_PASS}&sni=${DOMAIN}&insecure=0#HY2-${DOMAIN}"
   echo "vless://${UUID}@${DOMAIN}:443?security=tls&type=ws&host=${DOMAIN}&sni=${DOMAIN}&path=${enc_path}&encryption=none#VLESS-${DOMAIN}"
+  if [[ "$WARP_ON" == "1" ]]; then
+    echo "hy2://${HY2_PASS}@${DOMAIN}:8443?obfs=salamander&obfs-password=${OBFS_PASS}&sni=${DOMAIN}&insecure=0#HY2-WARP-${DOMAIN}"
+    echo "vless://${UUID}@${DOMAIN}:8443?security=tls&type=ws&host=${DOMAIN}&sni=${DOMAIN}&path=${enc_path}&encryption=none#VLESS-WARP-${DOMAIN}"
+  fi
 } > /root/mynode-links.txt
 print_links
